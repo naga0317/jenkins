@@ -1,127 +1,139 @@
 pipeline {
-    agent any
+	agent any
 
-    environment {
-        IMAGE_NAME = "network-monitor:${BUILD_NUMBER}"
-        CONTAINER_NAME = "network-monitor-${BUILD_NUMBER}"
-        HOST_PORT = "19000"
-    }
+		environment {
+			IMAGE_NAME = "network-monitor:${BUILD_NUMBER}"
+				CONTAINER_NAME = "network-monitor-${BUILD_NUMBER}"
+				HOST_PORT = "19000"
+		}
 
-    stages {
+	stages {
 
-        stage('Checkout') {
-            steps {
-                checkout scm
-            }
-        }
+		stage('Checkout') {
+			steps {
+				checkout scm
+			}
+		}
 
-        stage('Build C++ Application') {
-            steps {
-                sh '''
-                    set -e
+		stage('Build C++ Application') {
+			steps {
+				sh '''
+					set -e
 
-                    rm -rf build
+					rm -rf build
 
-                    cmake -S . -B build
-                    cmake --build build -j$(nproc)
-                '''
-            }
-        }
+					cmake -S . -B build
+					cmake --build build -j$(nproc)
+					'''
+			}
+		}
 
-        stage('Native API Tests') {
-            steps {
-                sh '''
-                    set -e
+		stage('Unit Tests') {
+			steps {
+				sh '''
+					set -e
 
-                    ./build/network-monitor > native-server.log 2>&1 &
-                    APP_PID=$!
+					cd build
 
-                    cleanup() {
-                        kill $APP_PID 2>/dev/null || true
-                    }
+					ctest --output-on-failure
+					'''
+			}
+		}
 
-                    trap cleanup EXIT
+		stage('Native API Tests') {
+			steps {
+				sh '''
+					set -e
 
-                    echo "Waiting for application..."
+					./build/network-monitor > native-server.log 2>&1 &
+					APP_PID=$!
 
-                    for i in $(seq 1 20); do
-                        if curl -fsS http://127.0.0.1:9000/health > /dev/null; then
-                            break
-                        fi
-                        sleep 1
-                    done
+					cleanup() {
+						kill $APP_PID 2>/dev/null || true
+					}
 
-                    echo "Testing /health"
-                    curl -fsS http://127.0.0.1:9000/health
+				trap cleanup EXIT
 
-                    echo "Testing /system"
-                    curl -fsS http://127.0.0.1:9000/system
+					echo "Waiting for application..."
 
-                    echo "Testing /stats"
-                    curl -fsS http://127.0.0.1:9000/stats
-                '''
-            }
-        }
+					for i in $(seq 1 20); do
+						if curl -fsS http://127.0.0.1:9000/health > /dev/null; then
+							break
+								fi
+								sleep 1
+								done
 
-        stage('Build Docker Image') {
-            steps {
-                sh '''
-                    set -e
+								echo "Testing /health"
+								curl -fsS http://127.0.0.1:9000/health
 
-                    docker build \
-                        -t ${IMAGE_NAME} \
-                        .
-                '''
-            }
-        }
+								echo "Testing /system"
+								curl -fsS http://127.0.0.1:9000/system
 
-        stage('Deploy Container') {
-            steps {
-                sh '''
-                    set -e
+								echo "Testing /stats"
+								curl -fsS http://127.0.0.1:9000/stats
+								'''
+			}
+		}
 
-                    docker rm -f ${CONTAINER_NAME} 2>/dev/null || true
+		stage('Build Docker Image') {
+			steps {
+				sh '''
+					set -e
 
-                    docker run -d \
-                        --name ${CONTAINER_NAME} \
-                        -p ${HOST_PORT}:9000 \
-                        ${IMAGE_NAME}
-                '''
-            }
-        }
+					docker build \
+					-t ${IMAGE_NAME} \
+					.
+					'''
+			}
+		}
 
-        stage('Container API Tests') {
-            steps {
-                sh '''
-                    set -e
+		stage('Deploy Container') {
+			steps {
+				sh '''
+					set -e
 
-                    echo "Waiting for Docker container..."
+					docker rm -f ${CONTAINER_NAME} 2>/dev/null || true
 
-                    for i in $(seq 1 20); do
-                        if curl -fsS http://127.0.0.1:${HOST_PORT}/health > /dev/null; then
-                            break
-                        fi
-                        sleep 1
-                    done
+					docker run -d \
+					--name ${CONTAINER_NAME} \
+					-p ${HOST_PORT}:9000 \
+					${IMAGE_NAME}
+				'''
+			}
+		}
 
-                    echo "Testing container /health"
-                    curl -fsS http://127.0.0.1:${HOST_PORT}/health
+		stage('Container API Tests') {
+			steps {
+				sh '''
+					set -e
 
-                    echo "Testing container /system"
-                    curl -fsS http://127.0.0.1:${HOST_PORT}/system
+					echo "Waiting for Docker container..."
 
-                    echo "Testing container /stats"
-                    curl -fsS http://127.0.0.1:${HOST_PORT}/stats
-                '''
-            }
-        }
-    }
+					for i in $(seq 1 20); do
+						if curl -fsS http://127.0.0.1:${HOST_PORT}/health > /dev/null; then
+							break
+								fi
+								sleep 1
+								done
 
-    post {
-        always {
-            sh '''
-                docker rm -f ${CONTAINER_NAME} 2>/dev/null || true
-            '''
-        }
-    }
+								echo "Testing container /health"
+								curl -fsS http://127.0.0.1:${HOST_PORT}/health
+
+								echo "Testing container /system"
+								curl -fsS http://127.0.0.1:${HOST_PORT}/system
+
+								echo "Testing container /stats"
+								curl -fsS http://127.0.0.1:${HOST_PORT}/stats
+								'''
+			}
+		}
+	}
+
+	post {
+		always {
+			sh '''
+				docker rm -f ${CONTAINER_NAME} 2>/dev/null || true
+				'''
+		}
+	}
 }
