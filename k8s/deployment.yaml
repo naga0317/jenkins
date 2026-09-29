@@ -1,0 +1,68 @@
+apiVersion: apps/v1
+kind: Deployment
+
+metadata:
+  name: network-monitor
+
+spec:
+  replicas: 2
+
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+
+  selector:
+    matchLabels:
+      app: network-monitor
+
+  template:
+    metadata:
+      labels:
+        app: network-monitor
+
+    spec:
+      containers:
+        - name: network-monitor
+
+          image: 172.17.0.2:5000/network-monitor:build-8
+
+          imagePullPolicy: Always
+
+          ports:
+            - containerPort: 9000
+              protocol: TCP
+
+          envFrom:
+            - configMapRef:
+                name: network-monitor-config
+
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 9000
+
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 9000
+
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
