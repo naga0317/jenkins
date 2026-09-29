@@ -449,19 +449,32 @@ for number, tag in delete:
                     echo "${BUILD_IMAGE_TAG}"
 
                     echo
+                    echo "Patching deployment manifest with build image..."
+                    BUILD_IMAGE_TAG="${BUILD_IMAGE_TAG}" python3 - <<'PY'
+import os
+import re
+
+path = 'k8s/deployment.yaml'
+image = os.environ['BUILD_IMAGE_TAG']
+with open(path, 'r', encoding='utf-8') as f:
+    text = f.read()
+
+updated, count = re.subn(r'(?m)^(\s*image:\s*).+$', rf'\1{image}', text, count=1)
+if count != 1:
+    raise SystemExit('Expected one image field in k8s/deployment.yaml')
+
+with open(path, 'w', encoding='utf-8') as f:
+    f.write(updated)
+PY
+
+                    echo
+                    echo "Applying Kubernetes manifests..."
+                    kubectl apply -f k8s/configmap.yaml
+                    kubectl apply -f k8s/deployment.yaml
+                    kubectl apply -f k8s/service.yaml
+
+                    echo
                     echo "Current Deployment image:"
-                    kubectl get deployment \
-                        ${K8S_DEPLOYMENT} \
-                        -o jsonpath='{.spec.template.spec.containers[0].image}'
-
-                    echo
-                    echo "Updating Deployment image..."
-                    kubectl set image \
-                        deployment/${K8S_DEPLOYMENT} \
-                        ${K8S_CONTAINER}=${BUILD_IMAGE_TAG}
-
-                    echo
-                    echo "New Deployment image:"
                     kubectl get deployment \
                         ${K8S_DEPLOYMENT} \
                         -o jsonpath='{.spec.template.spec.containers[0].image}'
@@ -487,12 +500,12 @@ for number, tag in delete:
                     fi
 
                     kubectl rollout status \
-                        deployment/network-monitor \
+                        deployment/${K8S_DEPLOYMENT} \
                         --timeout=180s
 
                     echo
                     echo "Deployment status:"
-                    kubectl get deployment network-monitor
+                    kubectl get deployment ${K8S_DEPLOYMENT}
 
                     echo
                     echo "Pods:"
@@ -525,7 +538,7 @@ for number, tag in delete:
 
                     echo
                     echo "Testing Kubernetes Service..."
-                    kubectl get service network-monitor
+                    kubectl get service ${K8S_DEPLOYMENT}
 
                     echo
                     echo "Testing /health"
