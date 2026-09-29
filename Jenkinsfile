@@ -372,7 +372,6 @@ for number, tag in delete:
                         echo "$OLD_TAGS"
 
                         for TAG in $OLD_TAGS; do
-
                             echo
                             echo "Processing:"
                             echo "$TAG"
@@ -380,6 +379,7 @@ for number, tag in delete:
                             DIGEST=$(curl -fsSI \
                                 -H "Accept: application/vnd.docker.distribution.manifest.v2+json" \
                                 "http://localhost:5000/v2/network-monitor/manifests/$TAG" \
+                                2>/dev/null \
                                 | awk -F': ' '
                                     tolower($1)=="docker-content-digest" {
                                         print $2
@@ -389,8 +389,8 @@ for number, tag in delete:
                                 | tr -d '\\r')
 
                             if [ -z "$DIGEST" ]; then
-                                echo "Could not find digest for $TAG"
-                                exit 1
+                                echo "Tag $TAG is already absent from the registry; skipping deletion."
+                                continue
                             fi
 
                             echo "Digest:"
@@ -398,9 +398,12 @@ for number, tag in delete:
 
                             echo "Deleting manifest..."
 
-                            curl -fsS \
+                            if ! curl -fsS \
                                 -X DELETE \
-                                "http://localhost:5000/v2/network-monitor/manifests/$DIGEST"
+                                "http://localhost:5000/v2/network-monitor/manifests/$DIGEST"; then
+                                echo "Failed to delete $TAG ($DIGEST); continuing with remaining tags."
+                                continue
+                            fi
 
                             echo
                             echo "Deleted:"
