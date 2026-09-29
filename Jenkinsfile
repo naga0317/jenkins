@@ -1,55 +1,127 @@
 pipeline {
     agent any
 
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+
+        buildDiscarder(
+            logRotator(
+                numToKeepStr: '10'
+            )
+        )
+    }
+
     environment {
         IMAGE_NAME = "network-monitor"
         REGISTRY = "localhost:5000"
         REGISTRY_IMAGE = "${REGISTRY}/${IMAGE_NAME}"
 
-        CONTAINER_NAME = "network-monitor-${BUILD_NUMBER}"
-        HOST_PORT = "19000"
-
         RETAIN_BUILDS = "2"
+
+        K8S_DEPLOYMENT = "network-monitor"
+        K8S_CONTAINER = "network-monitor"
+
+        HOST_PORT = "19000"
     }
 
     stages {
 
+        /*
+         * ============================================================
+         * 1. CHECKOUT
+         * ============================================================
+         */
+
         stage('Checkout') {
             steps {
                 checkout scm
+
+                sh '''
+                    set -e
+
+                    echo "======================================"
+                    echo "Git Information"
+                    echo "======================================"
+
+                    git rev-parse --short HEAD
+                    git log -1 --oneline
+                '''
             }
         }
+
+
+        /*
+         * ============================================================
+         * 2. BUILD C++
+         * ============================================================
+         */
 
         stage('Build C++ Application') {
             steps {
                 sh '''
                     set -e
 
+                    echo "======================================"
+                    echo "Building C++ Application"
+                    echo "======================================"
+
                     rm -rf build
 
                     cmake -S . -B build
+
                     cmake --build build -j$(nproc)
+
+                    echo
+                    echo "Build completed successfully."
                 '''
             }
         }
+
+
+        /*
+         * ============================================================
+         * 3. UNIT TESTS
+         * ============================================================
+         */
 
         stage('Unit Tests') {
             steps {
                 sh '''
                     set -e
 
+                    echo "======================================"
+                    echo "Running Unit Tests"
+                    echo "======================================"
+
                     cd build
+
                     ctest --output-on-failure
+
+                    echo
+                    echo "Unit tests passed."
                 '''
             }
         }
+
+
+        /*
+         * ============================================================
+         * 4. NATIVE API TESTS
+         * ============================================================
+         */
 
         stage('Native API Tests') {
             steps {
                 sh '''
                     set -e
 
+                    echo "======================================"
+                    echo "Native API Tests"
+                    echo "======================================"
+
                     ./build/network-monitor > native-server.log 2>&1 &
+
                     APP_PID=$!
 
                     cleanup() {
@@ -60,61 +132,243 @@ pipeline {
 
                     echo "Waiting for application..."
 
+                    READY=0
+
                     for i in $(seq 1 20); do
-                        if curl -fsS http://127.0.0.1:9000/health > /dev/null; then
+
+                        if curl -fsS \
+                            http://127.0.0.1:9000/health \
+                            > /dev/null; then
+
+                            READY=1
+
                             echo "Application is ready."
+
                             break
                         fi
 
                         sleep 1
                     done
 
+                    if [ "$READY" -ne 1 ]; then
+                        echo "Application failed to start."
+
+                        cat native-server.log
+
+                        exit 1
+                    fi
+
+
+                    echo
                     echo "Testing /health"
-                    curl -fsS http://127.0.0.1:9000/health
+
+                    curl -fsS \
+                        http://127.0.0.1:9000/health
+
                     echo
 
+
+                    echo
                     echo "Testing /system"
-                    curl -fsS http://127.0.0.1:9000/system
+
+                    curl -fsS \
+                        http://127.0.0.1:9000/system
+
                     echo
 
-                    echo "Testing /stats"
-                    curl -fsS http://127.0.0.1:9000/stats
+
                     echo
+                    echo "Testing /stats"
+
+                    curl -fsS \
+                        http://127.0.0.1:9000/stats
+
+                    echo
+
+
+                    echo
+                    echo "Native API tests passed."
                 '''
             }
         }
 
+
+        /*
+         * ============================================================
+         * 5. BUILD DOCKER IMAGE
+         * ============================================================
+         */
+
         stage('Build Docker Image') {
             steps {
                 script {
+
                     env.BUILD_IMAGE_TAG =
                         "${REGISTRY_IMAGE}:build-${BUILD_NUMBER}"
 
                     sh """
                         set -e
 
-                        echo "Building Docker image:"
+                        echo "======================================"
+                        echo "Building Docker Image"
+                        echo "======================================"
+
+                        echo "Image:"
                         echo "${BUILD_IMAGE_TAG}"
 
                         docker build \
                             -t ${BUILD_IMAGE_TAG} \
                             .
+
+                        echo
+                        echo "Docker image built successfully."
+
+                        docker images \
+                            ${BUILD_IMAGE_TAG}
                     """
                 }
             }
         }
+
+
+        /*
+         * ============================================================
+         * 6. DOCKER IMAGE SMOKE TEST
+         * ============================================================
+         */
+
+        stage('Docker Image Smoke Test') {
+            steps {
+                sh """
+                    set -e
+
+                    echo "======================================"
+                    echo "Docker Image Smoke Test"
+                    echo "======================================"
+
+                    CONTAINER_NAME="network-monitor-smoke-${BUILD_NUMBER}"
+
+                    cleanup() {
+                        docker rm -f \$CONTAINER_NAME \
+                            2>/dev/null || true
+                    }
+
+                    trap cleanup EXIT
+
+                    echo "Starting container..."
+
+                    docker run -d \
+                        --name \$CONTAINER_NAME \
+                        -p ${HOST_PORT}:9000 \
+                        ${BUILD_IMAGE_TAG}
+
+                    echo
+                    echo "Waiting for container..."
+
+                    READY=0
+
+                    for i in \$(seq 1 20); do
+
+                        if curl -fsS \
+                            http://127.0.0.1:${HOST_PORT}/health \
+                            > /dev/null; then
+
+                            READY=1
+
+                            echo "Container is ready."
+
+                            break
+                        fi
+
+                        sleep 1
+                    done
+
+                    if [ "\$READY" -ne 1 ]; then
+                        echo "Container failed to start."
+
+                        docker logs \$CONTAINER_NAME
+
+                        exit 1
+                    fi
+
+
+                    echo
+                    echo "Testing container /health"
+
+                    curl -fsS \
+                        http://127.0.0.1:${HOST_PORT}/health
+
+                    echo
+
+
+                    echo
+                    echo "Testing container /system"
+
+                    curl -fsS \
+                        http://127.0.0.1:${HOST_PORT}/system
+
+                    echo
+
+
+                    echo
+                    echo "Testing container /stats"
+
+                    curl -fsS \
+                        http://127.0.0.1:${HOST_PORT}/stats
+
+                    echo
+
+
+                    echo
+                    echo "Docker image smoke test passed."
+                '''
+            }
+        }
+
+
+        /*
+         * ============================================================
+         * 7. PUSH DOCKER IMAGE
+         * ============================================================
+         */
 
         stage('Push Docker Image') {
             steps {
                 sh """
                     set -e
 
-                    echo "Pushing ${BUILD_IMAGE_TAG}"
+                    echo "======================================"
+                    echo "Pushing Docker Image"
+                    echo "======================================"
+
+                    echo "Pushing:"
+                    echo "${BUILD_IMAGE_TAG}"
 
                     docker push ${BUILD_IMAGE_TAG}
+
+                    echo
+                    echo "Docker push completed."
                 """
             }
         }
+
+
+        /*
+         * ============================================================
+         * 8. REGISTRY RETENTION
+         *
+         * Keep only:
+         *
+         * build-N
+         * build-(N-1)
+         *
+         * Do NOT create:
+         *
+         * latest
+         * 1.0.0
+         * git-xxxxxxx
+         * ============================================================
+         */
 
         stage('Registry Retention - Keep Last 2') {
             steps {
@@ -122,15 +376,19 @@ pipeline {
                     set -e
 
                     echo "======================================"
-                    echo "Registry retention policy"
-                    echo "Keeping latest 2 build images"
+                    echo "Registry Retention Policy"
                     echo "======================================"
+
+                    echo "Keeping latest ${RETAIN_BUILDS} build images."
 
                     TAGS=$(curl -fsS \
                         http://localhost:5000/v2/network-monitor/tags/list)
 
+
+                    echo
                     echo "All registry tags:"
                     echo "$TAGS"
+
 
                     echo
                     echo "Build tags before cleanup:"
@@ -146,19 +404,32 @@ tags = data.get("tags", [])
 build_tags = []
 
 for tag in tags:
+
     if tag.startswith("build-"):
+
         try:
             number = int(tag.split("-", 1)[1])
-            build_tags.append((number, tag))
+
+            build_tags.append(
+                (number, tag)
+            )
+
         except ValueError:
             pass
 
-for number, tag in sorted(build_tags, reverse=True):
+
+for number, tag in sorted(
+    build_tags,
+    reverse=True
+):
+
     print(tag)
 '
 
+
                     echo
                     echo "Determining old builds..."
+
 
                     OLD_TAGS=$(echo "$TAGS" | python3 -c '
 import sys
@@ -171,66 +442,103 @@ tags = data.get("tags", [])
 build_tags = []
 
 for tag in tags:
+
     if tag.startswith("build-"):
+
         try:
             number = int(tag.split("-", 1)[1])
-            build_tags.append((number, tag))
+
+            build_tags.append(
+                (number, tag)
+            )
+
         except ValueError:
             pass
 
-build_tags.sort(reverse=True)
 
-keep = build_tags[:2]
-delete = build_tags[2:]
+build_tags.sort(
+    reverse=True
+)
 
-print("KEEP:")
-for number, tag in keep:
-    print(tag, file=sys.stderr)
 
-print("DELETE:", file=sys.stderr)
+retain_count = 2
+
+delete = build_tags[retain_count:]
+
+
 for number, tag in delete:
+
     print(tag)
 ')
 
+
                     if [ -z "$OLD_TAGS" ]; then
+
                         echo
                         echo "No old build images to delete."
+
                     else
+
                         echo
-                        echo "Deleting old build images..."
+                        echo "Old build images to delete:"
+
+                        echo "$OLD_TAGS"
+
 
                         for TAG in $OLD_TAGS; do
 
                             echo
-                            echo "Processing $TAG"
+                            echo "Processing:"
+                            echo "$TAG"
+
 
                             DIGEST=$(curl -fsSI \
                                 -H "Accept: application/vnd.docker.distribution.manifest.v2+json" \
                                 "http://localhost:5000/v2/network-monitor/manifests/$TAG" \
-                                | awk -F': ' 'tolower($1)=="docker-content-digest" {print $2}' \
+                                | awk -F': ' '
+                                    tolower($1)=="docker-content-digest" {
+                                        print $2
+                                        exit
+                                    }
+                                ' \
                                 | tr -d '\\r')
 
+
                             if [ -z "$DIGEST" ]; then
+
                                 echo "Could not find digest for $TAG"
+
                                 exit 1
+
                             fi
 
-                            echo "Digest: $DIGEST"
+
+                            echo "Digest:"
+                            echo "$DIGEST"
+
 
                             echo "Deleting manifest..."
 
-                            curl -fsS -X DELETE \
+
+                            curl -fsS \
+                                -X DELETE \
                                 "http://localhost:5000/v2/network-monitor/manifests/$DIGEST"
 
+
                             echo
-                            echo "Deleted $TAG"
+                            echo "Deleted:"
+                            echo "$TAG"
+
                         done
+
                     fi
+
 
                     echo
                     echo "======================================"
-                    echo "Registry tags after cleanup"
+                    echo "Registry Tags After Cleanup"
                     echo "======================================"
+
 
                     curl -fsS \
                         http://localhost:5000/v2/network-monitor/tags/list
@@ -240,111 +548,290 @@ for number, tag in delete:
             }
         }
 
-        stage('Deploy Container') {
+
+        /*
+         * ============================================================
+         * 9. KUBERNETES DEPLOYMENT
+         *
+         * Deploy the exact build generated by this Jenkins run.
+         *
+         * Example:
+         *
+         * localhost:5000/network-monitor:build-10
+         *
+         * ============================================================
+         */
+
+        stage('Deploy to Kubernetes') {
             steps {
                 sh """
                     set -e
 
-                    echo "Removing previous container if present..."
+                    echo "======================================"
+                    echo "Deploying to Kubernetes"
+                    echo "======================================"
 
-                    docker rm -f ${CONTAINER_NAME} 2>/dev/null || true
+                    echo
+                    echo "Kubernetes context:"
 
-                    echo "Pulling current build..."
+                    kubectl config current-context
 
-                    docker pull ${BUILD_IMAGE_TAG}
 
-                    echo "Starting container..."
+                    echo
+                    echo "Target image:"
 
-                    docker run -d \
-                        --name ${CONTAINER_NAME} \
-                        -p ${HOST_PORT}:9000 \
-                        ${BUILD_IMAGE_TAG}
+                    echo "${BUILD_IMAGE_TAG}"
 
-                    docker ps --filter "name=${CONTAINER_NAME}"
+
+                    echo
+                    echo "Current Deployment image:"
+
+                    kubectl get deployment \
+                        ${K8S_DEPLOYMENT} \
+                        -o jsonpath='{.spec.template.spec.containers[0].image}'
+
+                    echo
+
+
+                    echo
+                    echo "Updating Deployment image..."
+
+
+                    kubectl set image \
+                        deployment/${K8S_DEPLOYMENT} \
+                        ${K8S_CONTAINER}=${BUILD_IMAGE_TAG}
+
+
+                    echo
+                    echo "New Deployment image:"
+
+                    kubectl get deployment \
+                        ${K8S_DEPLOYMENT} \
+                        -o jsonpath='{.spec.template.spec.containers[0].image}'
+
+                    echo
                 """
             }
         }
 
-        stage('Container API Tests') {
+
+        /*
+         * ============================================================
+         * 10. KUBERNETES ROLLING UPDATE
+         * ============================================================
+         */
+
+        stage('Kubernetes Rollout Status') {
             steps {
                 sh '''
                     set -e
 
-                    echo "Waiting for Docker container..."
+                    echo "======================================"
+                    echo "Kubernetes Rolling Update"
+                    echo "======================================"
 
-                    for i in $(seq 1 20); do
 
-                        if curl -fsS \
-                            http://127.0.0.1:${HOST_PORT}/health > /dev/null; then
+                    kubectl rollout status \
+                        deployment/network-monitor \
+                        --timeout=180s
 
-                            echo "Container is ready."
-                            break
-                        fi
-
-                        sleep 1
-                    done
 
                     echo
-                    echo "Testing container /health"
+                    echo "Deployment status:"
 
-                    curl -fsS \
-                        http://127.0.0.1:${HOST_PORT}/health
+                    kubectl get deployment \
+                        network-monitor
 
-                    echo
-
-                    echo "Testing container /system"
-
-                    curl -fsS \
-                        http://127.0.0.1:${HOST_PORT}/system
 
                     echo
+                    echo "Pods:"
 
-                    echo "Testing container /stats"
+                    kubectl get pods \
+                        -l app=network-monitor \
+                        -o wide
 
-                    curl -fsS \
-                        http://127.0.0.1:${HOST_PORT}/stats
 
                     echo
+                    echo "ReplicaSets:"
+
+                    kubectl get replicasets \
+                        -l app=network-monitor
+                '''
+            }
+        }
+
+
+        /*
+         * ============================================================
+         * 11. KUBERNETES API TESTS
+         * ============================================================
+         */
+
+        stage('Kubernetes API Tests') {
+            steps {
+                sh '''
+                    set -e
+
+                    echo "======================================"
+                    echo "Kubernetes API Tests"
+                    echo "======================================"
+
+
+                    echo
+                    echo "Testing Kubernetes Service..."
+
+                    kubectl get service network-monitor
+
+
+                    echo
+                    echo "Testing /health"
+
+
+                    TEST_POD="network-monitor-api-test-${BUILD_NUMBER}-health"
+
+
+                    kubectl run "$TEST_POD" \
+                        --restart=Never \
+                        --image=curlimages/curl \
+                        --command -- \
+                        curl -fsS \
+                        http://network-monitor:9000/health
+
+
+                    kubectl wait \
+                        --for=jsonpath='{.status.phase}'=Succeeded \
+                        pod/"$TEST_POD" \
+                        --timeout=60s
+
+
+                    kubectl delete pod "$TEST_POD" \
+                        --ignore-not-found=true \
+                        --wait=true
+
+
+                    echo
+                    echo "Testing /system"
+
+
+                    TEST_POD="network-monitor-api-test-${BUILD_NUMBER}-system"
+
+
+                    kubectl run "$TEST_POD" \
+                        --restart=Never \
+                        --image=curlimages/curl \
+                        --command -- \
+                        curl -fsS \
+                        http://network-monitor:9000/system
+
+
+                    kubectl wait \
+                        --for=jsonpath='{.status.phase}'=Succeeded \
+                        pod/"$TEST_POD" \
+                        --timeout=60s
+
+
+                    kubectl delete pod "$TEST_POD" \
+                        --ignore-not-found=true \
+                        --wait=true
+
+
+                    echo
+                    echo "Testing /stats"
+
+
+                    TEST_POD="network-monitor-api-test-${BUILD_NUMBER}-stats"
+
+
+                    kubectl run "$TEST_POD" \
+                        --restart=Never \
+                        --image=curlimages/curl \
+                        --command -- \
+                        curl -fsS \
+                        http://network-monitor:9000/stats
+
+
+                    kubectl wait \
+                        --for=jsonpath='{.status.phase}'=Succeeded \
+                        pod/"$TEST_POD" \
+                        --timeout=60s
+
+
+                    kubectl delete pod "$TEST_POD" \
+                        --ignore-not-found=true \
+                        --wait=true
+
+
+                    echo
+                    echo "======================================"
+                    echo "All Kubernetes API tests passed"
+                    echo "======================================"
                 '''
             }
         }
     }
 
+
+    /*
+     * ================================================================
+     * POST ACTIONS
+     * ================================================================
+     */
+
     post {
 
         success {
+
             echo """
 ========================================
 CI/CD PIPELINE SUCCESS
 ========================================
 
-Jenkins build: ${BUILD_NUMBER}
+Jenkins build:
+${BUILD_NUMBER}
 
 Docker image:
 ${BUILD_IMAGE_TAG}
 
-Registry retention:
-Latest 2 builds only
+Registry:
+${REGISTRY}
+
+Registry policy:
+Keep latest 2 build-* images
+
+Kubernetes:
+Deployment = ${K8S_DEPLOYMENT}
 
 ========================================
 """
         }
 
+
         failure {
+
             echo """
 ========================================
 CI/CD PIPELINE FAILED
 ========================================
 
-Jenkins build: ${BUILD_NUMBER}
+Jenkins build:
+${BUILD_NUMBER}
+
+Docker image:
+${BUILD_IMAGE_TAG}
 
 ========================================
 """
         }
 
+
         always {
+
             sh '''
-                docker rm -f ${CONTAINER_NAME} 2>/dev/null || true
+                echo "Cleaning temporary Docker containers..."
+
+                docker rm -f \
+                    network-monitor-smoke-${BUILD_NUMBER} \
+                    2>/dev/null || true
             '''
         }
     }
