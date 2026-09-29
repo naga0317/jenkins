@@ -459,7 +459,12 @@ image = os.environ['BUILD_IMAGE_TAG']
 with open(path, 'r', encoding='utf-8') as f:
     text = f.read()
 
-updated, count = re.subn(r'(?m)^(\s*image:\s*).+$', rf'\1{image}', text, count=1)
+updated, count = re.subn(
+    r'(?m)^(\s*image:\s*).+$',
+    lambda match: match.group(1) + image,
+    text,
+    count=1,
+)
 if count != 1:
     raise SystemExit('Expected one image field in k8s/deployment.yaml')
 
