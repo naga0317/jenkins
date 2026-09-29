@@ -452,24 +452,25 @@ for number, tag in delete:
                     echo "Patching deployment manifest with build image..."
                     BUILD_IMAGE_TAG="${BUILD_IMAGE_TAG}" python3 - <<'PY'
 import os
-import re
 
 path = 'k8s/deployment.yaml'
 image = os.environ['BUILD_IMAGE_TAG']
-with open(path, 'r', encoding='utf-8') as f:
-    text = f.read()
 
-updated, count = re.subn(
-    r'(?m)^(\s*image:\s*).+$',
-    lambda match: match.group(1) + image,
-    text,
-    count=1,
-)
-if count != 1:
+with open(path, 'r', encoding='utf-8') as f:
+    lines = f.readlines()
+
+updated = False
+for i, line in enumerate(lines):
+    if line.strip().startswith('image:'):
+        lines[i] = '          image: ' + image + '\n'
+        updated = True
+        break
+
+if not updated:
     raise SystemExit('Expected one image field in k8s/deployment.yaml')
 
 with open(path, 'w', encoding='utf-8') as f:
-    f.write(updated)
+    f.writelines(lines)
 PY
 
                     echo
