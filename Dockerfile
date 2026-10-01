@@ -17,7 +17,7 @@ WORKDIR /app
 
 COPY . .
 
-RUN cmake -S . -B build && \
+RUN cmake -S . -B build -DBUILD_TESTING=OFF && \
     cmake --build build -j$(nproc)
 
 
